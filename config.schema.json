@@ -1,0 +1,44 @@
+{
+  "pluginAlias": "OpenEVSE",
+  "pluginType": "accessory",
+  "singular": true,
+  "schema": {
+    "type": "object",
+    "properties": {
+      "name": {
+        "title": "Name",
+        "type": "string",
+        "default": "EV Charger",
+        "required": true
+      },
+      "host": {
+        "title": "OpenEVSE IP/Hostname",
+        "type": "string",
+        "required": true,
+        "format": "hostname"
+      },
+      "port": {
+        "title": "Port",
+        "type": "integer",
+        "default": 80,
+        "minimum": 1,
+        "maximum": 65535
+      },
+      "username": {
+        "title": "Username (Basic Auth)",
+        "type": "string"
+      },
+      "password": {
+        "title": "Password",
+        "type": "string",
+        "format": "password"
+      },
+      "pollInterval": {
+        "title": "Poll Interval (seconds)",
+        "type": "integer",
+        "default": 10,
+        "minimum": 5
+      }
+    }
+  }
+}
