@@ -28,9 +28,11 @@ class OpenEVSEAccessory {
 
     // 1. Battery Service (The Main Tile)
     this.batteryService = new Service.Battery(this.name);
+    this.batteryService.setPrimaryService(true);
     
-    // 2. Power Sensor (LightSensor hack for kW)
+    // 2. Power Sensor (LightSensor hack for watts)
     this.powerService = new Service.LightSensor(this.name + ' Power');
+    this.batteryService.addLinkedService(this.powerService);
 
     // 3. Accessory Info
     this.infoService = new Service.AccessoryInformation()
