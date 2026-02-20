@@ -1,44 +1,45 @@
 {
   "pluginAlias": "OpenEVSE",
   "pluginType": "accessory",
-  "singular": true,
+  "headerText": "OpenEVSE Configuration (v2.0.0)",
   "schema": {
     "type": "object",
     "properties": {
       "name": {
         "title": "Name",
         "type": "string",
-        "default": "EV Charger",
-        "required": true
+        "default": "EV Charger"
       },
       "host": {
-        "title": "OpenEVSE IP/Hostname",
+        "title": "OpenEVSE IP Address",
         "type": "string",
-        "required": true,
-        "format": "hostname"
+        "placeholder": "192.168.1.XX"
       },
-      "port": {
-        "title": "Port",
+      "mqtt_host": {
+        "title": "MQTT Broker Host",
+        "type": "string",
+        "placeholder": "192.168.1.XX"
+      },
+      "mqtt_port": {
+        "title": "MQTT Broker Port",
         "type": "integer",
-        "default": 80,
-        "minimum": 1,
-        "maximum": 65535
+        "default": 1883
       },
-      "username": {
-        "title": "Username (Basic Auth)",
+      "mqtt_topic": {
+        "title": "MQTT Base Topic",
+        "type": "string",
+        "default": "openevse"
+      },
+      "mqtt_user": {
+        "title": "MQTT Username",
         "type": "string"
       },
-      "password": {
-        "title": "Password",
+      "mqtt_pass": {
+        "title": "MQTT Password",
         "type": "string",
         "format": "password"
-      },
-      "pollInterval": {
-        "title": "Poll Interval (seconds)",
-        "type": "integer",
-        "default": 10,
-        "minimum": 5
       }
-    }
+    },
+    "required": ["host", "mqtt_host"]
   }
 }

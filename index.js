@@ -1,16 +1,14 @@
 'use strict';
 
 const http = require('http');
-const https = require('https');
+const mqtt = require('mqtt');
 
-let Accessory, Service, Characteristic;
+let Service, Characteristic;
 
-module.exports = (api) => {
-  Accessory = api.platformAccessory;
-  Service = api.hap.Service;
-  Characteristic = api.hap.Characteristic;
-
-  api.registerAccessory('OpenEVSE', OpenEVSEAccessory);
+module.exports = (homebridge) => {
+  Service = homebridge.hap.Service;
+  Characteristic = homebridge.hap.Characteristic;
+  homebridge.registerAccessory('OpenEVSE', OpenEVSEAccessory);
 };
 
 class OpenEVSEAccessory {
@@ -19,126 +17,181 @@ class OpenEVSEAccessory {
     this.config = config;
     this.name = config.name || 'EV Charger';
     this.host = config.host;
-    this.port = config.port || 80;
-    this.username = config.username;
-    this.password = config.password;
-    this.pollInterval = (config.pollInterval || 10) * 1000;
-
-    // State
+    this.baseTopic = config.mqtt_topic || 'openevse';
+    
+    // Internal State
+    this.evseState = 1; // Default to Disconnected
+    this.chargeLevel = 100; // Battery Level (SoC)
     this.isCharging = false;
-    this.currentWatts = 0;
-    this.currentAmps = 0;
+    this.watts = 0;
+    this.amps = 0;
 
-    // Services
-    this.switchService = new Service.Switch(this.name);
-    this.powerService = new Service.LightSensor(this.name + ' Power'); // Reuse LightSensor for watts
-    this.currentService = new Service.TemperatureSensor(this.name + ' Amps'); // Reuse for amps (float)
+    // 1. Battery Service (The Main Tile)
+    this.batteryService = new Service.Battery(this.name);
+    
+    // 2. Power Sensor (LightSensor hack for kW)
+    this.powerService = new Service.LightSensor(this.name + ' Power');
 
-    this.informationService = new Service.AccessoryInformation()
+    // 3. Accessory Info
+    this.infoService = new Service.AccessoryInformation()
       .setCharacteristic(Characteristic.Manufacturer, 'OpenEVSE')
-      .setCharacteristic(Characteristic.Model, 'WiFi Charger')
-      .setCharacteristic(Characteristic.SerialNumber, 'Unknown');
+      .setCharacteristic(Characteristic.Model, 'WiFi v5.1.5')
+      .setCharacteristic(Characteristic.SerialNumber, this.host || 'Unknown');
 
-    // Bind getters
-    this.switchService.getCharacteristic(Characteristic.On)
-      .onGet(this.getChargingState.bind(this));
+    // Initial Setup
+    this.initMQTT();
+    
+    // Initial HTTP Fetch & Poll Setup
+    if (this.host) {
+      this.fetchStatus();
+      this.pollInterval = setInterval(() => this.fetchStatus(), 30000);
+    } else {
+      this.log.warn('No "host" configured. HTTP polling disabled.');
+    }
+  }
 
-    this.powerService.getCharacteristic(Characteristic.CurrentAmbientLightLevel)
-      .onGet(this.getCurrentWatts.bind(this));
+  /**
+   * HTTP Polling Fallback
+   */
+  fetchStatus() {
+    const url = `http://${this.host}/status`;
+    
+    http.get(url, (res) => {
+      let data = '';
+      res.on('data', (chunk) => { data += chunk; });
+      res.on('end', () => {
+        try {
+          const status = JSON.parse(data);
+          this.log.debug(`HTTP Status received from ${this.host}`);
+          
+          this.processUpdate({
+            state: status.state,
+            watt: status.watt,
+            soc: status.soc,
+            amp: status.amp
+          });
+        } catch (e) {
+          this.log.error(`Error parsing HTTP response from ${this.host}: ${e.message}`);
+        }
+      });
+    }).on('error', (err) => {
+      this.log.error(`HTTP Polling Error to ${this.host}: ${err.message}`);
+    });
+  }
 
-    this.currentService.getCharacteristic(Characteristic.CurrentTemperature)
-      .onGet(this.getCurrentAmps.bind(this));
+  initMQTT() {
+    if (!this.config.mqtt_host) {
+      this.log.warn('No "mqtt_host" configured. MQTT disabled.');
+      return;
+    }
 
-    // Start polling
-    this.startPolling();
+    const broker = `mqtt://${this.config.mqtt_host}:${this.config.mqtt_port || 1883}`;
+    const options = {
+      reconnectPeriod: 5000, // Try reconnecting every 5s
+    };
+    
+    if (this.config.mqtt_user) {
+      options.username = this.config.mqtt_user;
+      options.password = this.config.mqtt_pass;
+    }
+
+    this.log(`Connecting to MQTT: ${broker}`);
+    this.client = mqtt.connect(broker, options);
+
+    this.client.on('connect', () => {
+      this.log('MQTT Connected');
+      this.client.subscribe(`${this.baseTopic}/state`);
+      this.client.subscribe(`${this.baseTopic}/amp`);
+      this.client.subscribe(`${this.baseTopic}/watt`);
+    });
+
+    this.client.on('message', (topic, message) => {
+      const value = message.toString();
+      const payload = {};
+
+      if (topic.endsWith('/state')) {
+        payload.state = parseInt(value);
+      } else if (topic.endsWith('/amp')) {
+        payload.amp = parseFloat(value);
+      } else if (topic.endsWith('/watt')) {
+        payload.watt = parseInt(value);
+      }
+
+      this.processUpdate(payload);
+    });
+
+    this.client.on('error', (err) => {
+      this.log.error(`MQTT Error: ${err.message}`);
+    });
+
+    this.client.on('offline', () => {
+      this.log.warn('MQTT client went offline. Retrying...');
+    });
+
+    this.client.on('reconnect', () => {
+      this.log('MQTT attempting to reconnect...');
+    });
+  }
+
+  /**
+   * Unified Processor for state updates from MQTT or HTTP
+   */
+  processUpdate(data) {
+    let updated = false;
+
+    // Update EVSE State
+    if (data.state !== undefined) {
+      this.evseState = data.state;
+      // States: 1=Disconnected, 2=Connected, 3=Charging, 4=Ventilation Required, 254=Sleeping, 255=Error
+      this.isCharging = (this.evseState === 3 || this.evseState === 4);
+      updated = true;
+    }
+
+    // Update SoC / Battery Level
+    if (data.soc !== undefined) {
+      this.chargeLevel = data.soc;
+    } else if (data.state !== undefined) {
+      // Dynamic Fallback: 0% if disconnected (state 1), 100% if anything else (connected/charging 2-4)
+      this.chargeLevel = (this.evseState === 1) ? 0 : 100;
+    }
+
+    // Update Watts (LightSensor hack)
+    if (data.watt !== undefined) {
+      this.watts = data.watt;
+      this.powerService.updateCharacteristic(
+        Characteristic.CurrentAmbientLightLevel, 
+        Math.max(0.0001, this.watts)
+      );
+    }
+
+    // Update Amps
+    if (data.amp !== undefined) {
+      this.amps = data.amp;
+    }
+
+    if (updated || data.soc !== undefined) {
+      this.updateHomeKit();
+    }
+  }
+
+  updateHomeKit() {
+    // Map EVSE state to HomeKit Battery states
+    // ChargingState: 0=Not Charging, 1=Charging, 2=Not Chargeable
+    const hkChargingState = this.isCharging ? 
+      Characteristic.ChargingState.CHARGING : 
+      Characteristic.ChargingState.NOT_CHARGING;
+
+    this.batteryService.updateCharacteristic(Characteristic.ChargingState, hkChargingState);
+    this.batteryService.updateCharacteristic(Characteristic.BatteryLevel, this.chargeLevel);
+    
+    // Status Low Battery used as an Error indicator
+    this.batteryService.updateCharacteristic(
+      Characteristic.StatusLowBattery, 
+      (this.evseState === 255) ? Characteristic.StatusLowBattery.BATTERY_LEVEL_LOW : Characteristic.StatusLowBattery.BATTERY_LEVEL_NORMAL
+    );
   }
 
   getServices() {
-    return [
-      this.informationService,
-      this.switchService,
-      this.powerService,
-      this.currentService
-    ];
-  }
-
-  // --- Getters ---
-  getChargingState() {
-    return this.isCharging;
-  }
-
-  getCurrentWatts() {
-    return this.currentWatts; // lux = watts
-  }
-
-  getCurrentAmps() {
-    return this.currentAmps; // °C = amps (float)
-  }
-
-  // --- Polling ---
-  startPolling() {
-    this.poll();
-    this.interval = setInterval(() => this.poll(), this.pollInterval);
-  }
-
-  poll() {
-    const protocol = this.port === 443 ? https : http;
-    const options = {
-      hostname: this.host,
-      port: this.port,
-      path: '/status',
-      method: 'GET',
-      headers: { 'Accept': 'application/json' }
-    };
-
-    if (this.username && this.password) {
-      const auth = 'Basic ' + Buffer.from(`${this.username}:${this.password}`).toString('base64');
-      options.headers.Authorization = auth;
-    }
-
-    const req = protocol.request(options, (res) => {
-      let data = '';
-      res.on('data', chunk => data += chunk);
-      res.on('end', () => {
-        try {
-          const json = JSON.parse(data);
-          if (json.stat !== undefined) {
-            const wasCharging = this.isCharging;
-            this.isCharging = json.stat === 3;
-
-            // Update values only when charging; 0 when not
-            this.currentWatts = this.isCharging && json.watts !== undefined ? json.watts : 0;
-            this.currentAmps = this.isCharging && json.amps !== undefined ? parseFloat(json.amps) : 0;
-
-            // Update characteristics
-            if (wasCharging !== this.isCharging) {
-              this.switchService.updateCharacteristic(Characteristic.On, this.isCharging);
-              this.log(`${this.name} → ${this.isCharging ? 'Charging' : 'Idle'}`);
-            }
-
-            this.powerService.updateCharacteristic(Characteristic.CurrentAmbientLightLevel, this.currentWatts);
-            this.currentService.updateCharacteristic(Characteristic.CurrentTemperature, this.currentAmps);
-          }
-        } catch (err) {
-          this.log.error(`JSON parse error: ${err.message}`);
-        }
-      });
-    });
-
-    req.on('error', (err) => {
-      this.log.error(`HTTP error: ${err.message}`);
-    });
-
-    req.setTimeout(5000, () => {
-      req.destroy();
-      this.log.warn('Request timeout');
-    });
-
-    req.end();
-  }
-
-  // Cleanup
-  shutdown() {
-    if (this.interval) clearInterval(this.interval);
+    return [this.infoService, this.batteryService, this.powerService];
   }
 }
