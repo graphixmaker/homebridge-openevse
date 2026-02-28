@@ -21,18 +21,18 @@ class OpenEVSEAccessory {
     
     // Internal State
     this.evseState = 1; // Default to Disconnected
-    this.chargeLevel = 100; // Battery Level (SoC)
     this.isCharging = false;
     this.watts = 0;
     this.amps = 0;
 
-    // 1. Battery Service (The Main Tile)
-    this.batteryService = new Service.Battery(this.name);
-    this.batteryService.setPrimaryService(true);
+    // 1. Outlet Service (The Main Tile) - Read-only status indicator
+    // On = Connected/Charging, Off = Disconnected
+    this.outletService = new Service.Outlet(this.name);
+    this.outletService.setPrimaryService(true);
     
     // 2. Power Sensor (LightSensor hack for watts)
     this.powerService = new Service.LightSensor(this.name + ' Power');
-    this.batteryService.addLinkedService(this.powerService);
+    this.outletService.addLinkedService(this.powerService);
 
     // 3. Accessory Info
     this.infoService = new Service.AccessoryInformation()
@@ -69,7 +69,6 @@ class OpenEVSEAccessory {
           this.processUpdate({
             state: status.state,
             watt: status.watt,
-            soc: status.soc,
             amp: status.amp
           });
         } catch (e) {
@@ -145,16 +144,11 @@ class OpenEVSEAccessory {
     if (data.state !== undefined) {
       this.evseState = data.state;
       // States: 1=Disconnected, 2=Connected, 3=Charging, 4=Ventilation Required, 254=Sleeping, 255=Error
+      // Outlet On = Connected (2), Charging (3), or Ventilation Required (4)
+      // Outlet Off = Disconnected (1), Sleeping (254), or Error (255)
+      const wasCharging = this.isCharging;
       this.isCharging = (this.evseState === 3 || this.evseState === 4);
       updated = true;
-    }
-
-    // Update SoC / Battery Level
-    if (data.soc !== undefined) {
-      this.chargeLevel = data.soc;
-    } else if (data.state !== undefined) {
-      // Dynamic Fallback: 0% if disconnected (state 1), 100% if anything else (connected/charging 2-4)
-      this.chargeLevel = (this.evseState === 1) ? 0 : 100;
     }
 
     // Update Watts (LightSensor hack)
@@ -171,29 +165,30 @@ class OpenEVSEAccessory {
       this.amps = data.amp;
     }
 
-    if (updated || data.soc !== undefined) {
+    if (updated) {
       this.updateHomeKit();
     }
   }
 
   updateHomeKit() {
-    // Map EVSE state to HomeKit Battery states
-    // ChargingState: 0=Not Charging, 1=Charging, 2=Not Chargeable
-    const hkChargingState = this.isCharging ? 
-      Characteristic.ChargingState.CHARGING : 
-      Characteristic.ChargingState.NOT_CHARGING;
-
-    this.batteryService.updateCharacteristic(Characteristic.ChargingState, hkChargingState);
-    this.batteryService.updateCharacteristic(Characteristic.BatteryLevel, this.chargeLevel);
+    // Map EVSE state to HomeKit Outlet On/Off
+    // Outlet On = Connected/Charging (states 2, 3, 4)
+    // Outlet Off = Disconnected/Error (states 1, 254, 255)
+    const isOutletOn = (this.evseState === 2 || this.evseState === 3 || this.evseState === 4);
     
-    // Status Low Battery used as an Error indicator
-    this.batteryService.updateCharacteristic(
-      Characteristic.StatusLowBattery, 
-      (this.evseState === 255) ? Characteristic.StatusLowBattery.BATTERY_LEVEL_LOW : Characteristic.StatusLowBattery.BATTERY_LEVEL_NORMAL
+    this.outletService.updateCharacteristic(Characteristic.On, isOutletOn);
+    
+    // Update InUse characteristic (true when actively charging, i.e., state 3 or 4)
+    this.outletService.updateCharacteristic(Characteristic.InUse, this.isCharging);
+    
+    // Update OutletInUse for error indication
+    this.outletService.updateCharacteristic(
+      Characteristic.OutletInUse,
+      (this.evseState === 255) ? true : false
     );
   }
 
   getServices() {
-    return [this.infoService, this.batteryService, this.powerService];
+    return [this.infoService, this.outletService, this.powerService];
   }
 }
