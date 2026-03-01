@@ -27,14 +27,11 @@ class OpenEVSEAccessory {
 
     // 1. Outlet Service (The Main Tile) - Read-only status indicator
     // On = Connected/Charging, Off = Disconnected
+    // Uses CurrentConsumption characteristic for power reporting (shows in detail view)
     this.outletService = new Service.Outlet(this.name);
     this.outletService.setPrimaryService(true);
-    
-    // 2. Power Sensor (LightSensor hack for watts)
-    this.powerService = new Service.LightSensor(this.name + ' Power');
-    this.outletService.addLinkedService(this.powerService);
 
-    // 3. Accessory Info
+    // 2. Accessory Info
     this.infoService = new Service.AccessoryInformation()
       .setCharacteristic(Characteristic.Manufacturer, 'OpenEVSE')
       .setCharacteristic(Characteristic.Model, 'WiFi v5.1.5')
@@ -151,12 +148,12 @@ class OpenEVSEAccessory {
       updated = true;
     }
 
-    // Update Watts (LightSensor hack)
+    // Update Watts (reported via CurrentConsumption on OutletService)
     if (data.watt !== undefined) {
       this.watts = data.watt;
-      this.powerService.updateCharacteristic(
-        Characteristic.CurrentAmbientLightLevel, 
-        Math.max(0.0001, this.watts)
+      this.outletService.updateCharacteristic(
+        Characteristic.CurrentConsumption,
+        this.watts
       );
     }
 
@@ -189,6 +186,6 @@ class OpenEVSEAccessory {
   }
 
   getServices() {
-    return [this.infoService, this.outletService, this.powerService];
+    return [this.infoService, this.outletService];
   }
 }
